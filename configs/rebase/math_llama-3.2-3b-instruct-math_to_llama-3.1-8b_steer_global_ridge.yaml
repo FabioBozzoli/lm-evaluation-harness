@@ -1,0 +1,59 @@
+# steer_text, standard regime + global_ridge: A = Llama-3.2-3B-Instruct ->
+# Llama-3.2-3B_math corrects meta-llama/Llama-3.1-8B's lm_head input at every position.
+# The affordable steer_text path -- plain forward passes only (_collect_standard_split),
+# no forward-mode AD, no per-block jvp loop -- compare with the sibling block_ridge
+# config, whose linear regime is much more expensive and much less tested at this scale.
+#
+# BLOCKING PREREQUISITE -- same as the block_ridge config, NOT specific to feature_regime
+# (Stage 1's math is identical either way, only how features are *collected* differs):
+# Llama-3.2-3B_math's embed_tokens/lm_head (tied) has vocab_size=128320, 64 rows more
+# than Llama-3.1-8B's standard 128256; Stage 1 combines w_a.T and w_b.T in one equation,
+# which needs equal vocab width. Unresolved as of this conversation -- do not submit
+# until it is (see the block_ridge config's comment for the diagnostic to run first).
+#
+# Memory -- calculated, not measured; see the theseus config for the same caveat.
+# Lower than block_ridge on both counts, since standard regime never doubles activation
+# memory (no jvp) and never caches the extra per-block tensors block_ridge needs:
+# - VRAM: same ~29 GB base as theseus (B 8B bf16 + two 3B-family sources bf16), plus a
+#   normal forward pass's activation memory (no jvp doubling) -- ~32-35 GB estimated.
+#   45 GB card recommended, 96 GB as the safe fallback.
+# - RAM: cached calibration features (~2-5 GB) plus Stage 1's pinv(w_b) -- B's lm_head
+#   is [128256, 4096], so its own float64 copy is ~4 GB and the SVD pinv needs
+#   internally builds ~8-13 GB more, transiently, on top of that -- roughly 30-40 GB
+#   peak. Rounded up generously to 64 GB below. (This same pinv cost applies to the
+#   block_ridge config too; its earlier RAM estimate underweighted it.)
+#
+# TODO: set source_finetuned to the Llama-3.2-3B_math directory on the cluster
+# (Hugging Face format). meta-llama repos are gated: see the HF token note in the
+# matching sbatch script.
+
+model: rebased
+model_args:
+  pretrained: meta-llama/Llama-3.1-8B
+  dtype: bfloat16
+  source_pretrained: meta-llama/Llama-3.2-3B-Instruct
+  source_finetuned: /work/intesasanpaolo_phd/lm-eval/checkpoints/Llama-3.2-3B_math  # TODO
+  method: steer_text
+  alpha: 1.0
+
+  calib_dataset: hkust-nlp/dart-math-hard
+  calib_config: default
+  calib_fields: query+response
+  calib_samples: 64
+  calib_test_samples: 4
+  calib_max_length: 512
+  calib_batch_size: 4
+
+  feature_regime: standard
+  stage_2_strategy: global_ridge
+  total_support_examples: 4096
+  stage1_lambda: 1.0
+  ridge_lambda: 1.0
+  feature_cache_dir: .cache/steer_text_features
+  force_recompute_features: false
+  seed: 42
+
+tasks: [gsm8k]
+batch_size: 4
+device: cuda
+log_samples: true
