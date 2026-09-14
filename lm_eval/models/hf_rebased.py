@@ -25,6 +25,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from lm_eval.api.registry import register_model
@@ -312,6 +313,88 @@ def fit_steer_text(
     )
 
 
+def _raw_next_token_features(
+    backbone: nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    """Backbone hidden state at every next-token position, flattened -- the pre-head rows
+    ``CausalLMHeadShim`` feeds into ``score``, without going through it."""
+    hidden = backbone(input_ids=input_ids, attention_mask=attention_mask)[0]
+    return hidden[:, :-1][_next_token_mask(attention_mask)]
+
+
+@torch.no_grad()
+def steering_loss_report(
+    target: nn.Module,
+    prepared: dict[str, Any],
+    source_pretrained: nn.Module,
+    source_finetuned: nn.Module,
+    test: tuple[DataLoader, DataLoader],
+    *,
+    alpha: float = 1.0,
+) -> dict[str, float]:
+    """Next-token cross-entropy loss/perplexity on the held-out calibration split, task-
+    appropriate for a generative model where steer_text's own diagnostics (argmax accuracy
+    over the full vocabulary, built for a small fixed label set) are not: a correction that
+    moves probability mass toward the right token without winning the argmax still lowers
+    loss, which is closer to what a downstream generation metric (pass@1, exact-match)
+    rewards than an exact top-1 match ever is.
+
+    Three numbers, all lower-is-better:
+    - ``stage0``: B, uncorrected.
+    - ``stage1_oracle``: B + A's *real* delta on this exact batch, projected through Stage
+      1's fitted ``logit_map``/``p_b`` -- a ceiling never available at real eval time
+      (A never runs then), same "oracle" framing as steer_text's own stage1 diagnostic.
+    - ``stage2``: B + the live correction, run through B's real forward pass under the
+      same correction context ``RebasedHFLM`` keeps active during evaluation -- this is
+      the number that should predict whether the rebased model does better on the
+      actual task.
+    """
+    source_loader, target_loader = test
+    logit_map = prepared["logit_map"].double()
+    p_b = prepared["p_b"].double()
+    use_block_ridge = prepared["stage_2_strategy"] == "block_ridge"
+    lm_head = target.get_output_embeddings()
+    device = next(target.parameters()).device
+
+    totals = {"stage0": 0.0, "stage1_oracle": 0.0, "stage2": 0.0}
+    n_tokens = 0
+
+    for source_batch, target_batch in zip(source_loader, target_loader, strict=True):
+        input_ids = target_batch["input_ids"].to(device)
+        attention_mask = target_batch["attention_mask"].to(device)
+        labels = target_batch["labels"].to(device)
+        n_tokens += int(labels.numel())
+
+        logits0 = target(input_ids=input_ids, attention_mask=attention_mask).logits
+        rows0 = logits0[:, :-1][_next_token_mask(attention_mask)]
+        totals["stage0"] += F.cross_entropy(rows0.float(), labels, reduction="sum").item()
+
+        context = (
+            block_ridge_correction_context(target, prepared, alpha=alpha)
+            if use_block_ridge
+            else steer_text_correction_context(SimpleNamespace(model=CausalLMHeadShim(target)), prepared, alpha=alpha)
+        )
+        with context:
+            logits2 = target(input_ids=input_ids, attention_mask=attention_mask).logits
+        rows2 = logits2[:, :-1][_next_token_mask(attention_mask)]
+        totals["stage2"] += F.cross_entropy(rows2.float(), labels, reduction="sum").item()
+
+        src_ids = source_batch["input_ids"].to(device)
+        src_mask = source_batch["attention_mask"].to(device)
+        f_a_pre = _raw_next_token_features(source_pretrained.base_model, src_ids, src_mask)
+        f_a_ft = _raw_next_token_features(source_finetuned.base_model, src_ids, src_mask)
+        delta_a = (f_a_ft - f_a_pre).double().cpu()
+        f_b_raw = _raw_next_token_features(target.base_model, input_ids, attention_mask).double().cpu()
+        oracle_target = delta_a @ logit_map.T @ p_b.T
+        corrected = (f_b_raw + float(alpha) * oracle_target).to(device=device, dtype=lm_head.weight.dtype)
+        logits1 = lm_head(corrected)
+        totals["stage1_oracle"] += F.cross_entropy(logits1.float(), labels, reduction="sum").item()
+
+    report = {f"{name}_loss": total / n_tokens for name, total in totals.items()}
+    report.update({key.replace("_loss", "_ppl"): float(torch.tensor(value).exp()) for key, value in report.items()})
+    return report
+
+
 def _calibration_texts(dataset: str, config: str | None, split: str, fields: str, n: int) -> list[str]:
     """First ``n`` non-empty rows, ``fields`` joined by blank lines.
 
@@ -445,11 +528,12 @@ class RebasedHFLM(HFLM):
                     "(use models from the same family)."
                 )
             calib_key = f"{calib_dataset}|{calib_config}|{calib_split}|{calib_fields}|{calib_samples}|{calib_test_samples}|{calib_max_length}"
+            test_loaders = loaders(test_rows)
             prepared = fit_steer_text(
                 *sources,
                 self.model,
                 train=loaders(train_rows),
-                test=loaders(test_rows),
+                test=test_loaders,
                 device=device,
                 task=f"lm_{hashlib.sha1(calib_key.encode()).hexdigest()[:12]}",
                 source_tag=_path_tag(f"{source_pretrained}+{source_finetuned}"),
@@ -457,6 +541,26 @@ class RebasedHFLM(HFLM):
                 feature_cache_dir=str(feature_cache_dir or Path.home() / ".cache" / "lm_eval" / "steer_text"),
                 **method_params,
             )
+            if method_params.get("verbose", True):
+                # Loss/perplexity, not steer_text's own accuracy-over-the-full-vocabulary
+                # diagnostic: see steering_loss_report's docstring for why that one is
+                # misleading here. Computed before the permanent correction context below
+                # goes live, so stage0/stage2 here are not double-corrected.
+                report = steering_loss_report(
+                    self.model, prepared, *sources, test_loaders, alpha=float(alpha)
+                )
+                print(
+                    "[rebased] stage0 (B uncorrected):     "
+                    f"loss={report['stage0_loss']:.4f}  ppl={report['stage0_ppl']:.4f}"
+                )
+                print(
+                    "[rebased] stage1 (oracle, A's real delta): "
+                    f"loss={report['stage1_oracle_loss']:.4f}  ppl={report['stage1_oracle_ppl']:.4f}"
+                )
+                print(
+                    f"[rebased] stage2 (live correction, alpha={alpha}): "
+                    f"loss={report['stage2_loss']:.4f}  ppl={report['stage2_ppl']:.4f}"
+                )
             # Kept open for the lifetime of this object: the pre-hook sits on the real
             # lm_head, so every _model_call/_model_generate is corrected.
             if prepared["stage_2_strategy"] == "block_ridge":

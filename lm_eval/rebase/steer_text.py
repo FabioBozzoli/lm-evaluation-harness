@@ -716,6 +716,14 @@ class SteerTextRebase:
             "feature_regime": feature_regime,
             "num_source_blocks": num_source_blocks,
             "block_group_size": block_group_size,
+            # lm_eval/rebase addition (not in merge-and-rebase's original file): expose
+            # Stage 1's already-computed logit_map/p_b so a caller can build the oracle
+            # correction (delta_A @ logit_map.T @ p_b.T) for its own diagnostics -- e.g.
+            # a task-appropriate loss/perplexity metric instead of the classification-style
+            # accuracy below, which only fits a small, fixed label set. Nothing about how
+            # logit_map/p_b/the diagnostics themselves are computed changes.
+            "logit_map": logit_map,
+            "p_b": p_b,
             "diagnostics": {
                 "stage0_test_acc": stage0_test_acc,
                 "stage1_test_acc": stage1_test_acc,

@@ -15,6 +15,7 @@ from lm_eval.models.hf_rebased import (  # noqa: E402
     block_ridge_correction_context,
     calibration_loader,
     fit_steer_text,
+    steering_loss_report,
     theseus_rebase,
 )
 from lm_eval.rebase import get_method, list_methods  # noqa: E402
@@ -314,6 +315,41 @@ def test_steer_text_block_ridge_linear_corrects_every_position(tmp_path) -> None
     # A generation-style pass that only projects the last position gets the same correction there.
     assert torch.allclose(last_only[:, -1], steered[:, -1], atol=1e-5)
     assert torch.equal(base, restored)
+
+
+@pytest.mark.parametrize(
+    "stage_2",
+    [
+        pytest.param({"stage_2_strategy": "global_ridge"}, id="global_ridge"),
+        pytest.param({"stage_2_strategy": "block_ridge", "feature_regime": "linear"}, id="block_ridge"),
+    ],
+)
+def test_steering_loss_report_scores_all_three_stages(tmp_path, stage_2) -> None:
+    # Task-appropriate diagnostic (loss/perplexity) instead of steer_text's own
+    # accuracy-over-the-full-vocabulary one; needs prepared["logit_map"]/["p_b"],
+    # the one addition to steer_text.py's own return dict (see its diff against
+    # merge-and-rebase: import lines plus these two keys, nothing else).
+    source_pre, source_ft = _tiny_lm(32, seed=0), _tiny_lm(32, seed=1)
+    target = _tiny_lm(48, seed=2)
+    test_loaders = (_loader(), _loader())
+    prepared = fit_steer_text(
+        source_pre, source_ft, target,
+        train=(_loader(), _loader()), test=test_loaders, device="cpu",
+        feature_cache_dir=str(tmp_path), task="lm", source_tag="src", target_tag="tgt",
+        total_support_examples=32, seed=0, verbose=False, **stage_2,
+    )
+    assert prepared["logit_map"].shape == (VOCAB, 32)  # [V, source hidden dim]
+    assert prepared["p_b"].shape == (48, VOCAB)  # pinv(target head): [target hidden dim, V]
+
+    report = steering_loss_report(target, prepared, source_pre, source_ft, test_loaders)
+    assert set(report) == {
+        "stage0_loss", "stage1_oracle_loss", "stage2_loss",
+        "stage0_ppl", "stage1_oracle_ppl", "stage2_ppl",
+    }
+    for key, value in report.items():
+        assert torch.isfinite(torch.tensor(value)) and value > 0, (key, value)
+    for key in ("stage0", "stage1_oracle", "stage2"):
+        assert report[f"{key}_ppl"] == pytest.approx(torch.tensor(report[f"{key}_loss"]).exp().item())
 
 
 @pytest.mark.parametrize(
