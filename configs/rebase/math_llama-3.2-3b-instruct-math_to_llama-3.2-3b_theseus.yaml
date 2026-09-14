@@ -19,7 +19,7 @@ model_args:
   pretrained: meta-llama/Llama-3.2-3B
   dtype: bfloat16
   source_pretrained: meta-llama/Llama-3.2-3B-Instruct
-  source_finetuned: /work/tesi_bcalderara/merge-and-rebase/checkpoints/Llama-3.2-3B_math  # TODO
+  source_finetuned: /work/intesasanpaolo_phd/lm-eval/checkpoints/Llama-3.2-3B_math  # TODO
   method: theseus
   alpha: 1.0
 

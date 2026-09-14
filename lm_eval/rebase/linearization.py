@@ -1,14 +1,32 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
 
 import torch
 import torch.nn as nn
 from torch.func import functional_call, jvp
-from torch.nn.attention import SDPBackend, sdpa_kernel
+
+# lm_eval/rebase compatibility note (not present in merge-and-rebase's original file):
+# torch.nn.attention (SDPBackend/sdpa_kernel) only exists from PyTorch 2.3. Older versions
+# (2.0-2.2) force the MATH SDPA backend through torch.backends.cuda.sdp_kernel instead --
+# despite the "cuda" name, its three flags are a process-global switch for the SDPA
+# dispatcher, applied to CPU tensors too, matching this function's "regardless of device"
+# comment below. This only changes backend *selection* -- the jvp/functional_call math
+# below (the rebasin logic) is untouched.
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    def _math_sdpa_backend(device: torch.device):
+        return sdpa_kernel([SDPBackend.MATH], set_priority=True)
+except ImportError:
+
+    def _math_sdpa_backend(device: torch.device):
+        if hasattr(torch.backends.cuda, "sdp_kernel"):
+            return torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False)
+        return nullcontext()
 
 
 @contextmanager
@@ -22,7 +40,7 @@ def forward_ad_safe_attention_context(device: torch.device):
         # Forward-mode AD (torch.func.jvp) is only implemented for the MATH
         # SDPA backend; the flash/efficient backends raise NotImplementedError
         # regardless of device (CPU included), so force MATH unconditionally.
-        with sdpa_kernel([SDPBackend.MATH], set_priority=True):
+        with _math_sdpa_backend(device):
             yield
     finally:
         if old_mha_fastpath is not None:

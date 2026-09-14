@@ -32,7 +32,7 @@ RUN="${RUNS[$SLURM_ARRAY_TASK_ID]}"
 # TODO: verify these paths against your cluster layout. The environment must have
 # lm-eval's dependencies installed (pip install -e ".[hf]" from PROJECT_ROOT).
 PROJECT_ROOT="/homes/fbozzoli/lm-evaluation-harness"
-WORK_ROOT="/work/tesi_bcalderara/merge-and-rebase"
+WORK_ROOT="/work/intesasanpaolo_phd/merge-and-rebase"
 cd "$PROJECT_ROOT"
 
 LOG_DIR=".log/lm_eval_rebase_code/${RUN}"

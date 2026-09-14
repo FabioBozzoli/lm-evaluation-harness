@@ -1,0 +1,46 @@
+# steer_text, standard regime + global_mlp.
+# Same as the global_ridge config, but Stage 2 is a small residual MLP
+# (Linear(1536, mlp_hidden_dim) -> LeakyReLU -> Linear(mlp_hidden_dim, 1536)) fit
+# full-batch with AdamW on the total_support_examples token positions, instead of a
+# closed-form ridge. Target weights are never modified; the MLP output is added to the
+# input of Qwen2.5-1.5B's lm_head at every position (also during generation).
+#
+# The log prints stage0/stage1/stage2 next-token accuracy on the held-out calibration
+# rows: stage2 > stage0 means the MLP moves B toward A on this data. Compare stage2 with
+# the global_ridge run on the same features to see whether the nonlinearity helps.
+#
+# Features are cached under feature_cache_dir and shared with the global_ridge config
+# (same source/target/calibration/regime), so only the MLP fit reruns.
+
+model: rebased
+model_args:
+  pretrained: Qwen/Qwen2.5-1.5B
+  dtype: bfloat16
+  source_pretrained: Qwen/Qwen2.5-0.5B
+  source_finetuned: Qwen/Qwen2.5-Coder-0.5B
+  method: steer_text
+  alpha: 1.0
+
+  calib_dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
+  calib_config: default
+  calib_fields: problem+solution
+  calib_samples: 64
+  calib_test_samples: 4
+  calib_max_length: 512
+  calib_batch_size: 4
+
+  feature_regime: standard
+  stage_2_strategy: global_mlp
+  total_support_examples: 4096
+  stage1_lambda: 1.0
+  mlp_hidden_dim: 1024
+  mlp_epochs: 100
+  feature_cache_dir: .cache/steer_text_features
+  force_recompute_features: false
+  seed: 42
+
+tasks: [humaneval, mbpp]
+batch_size: 8
+device: cuda
+confirm_run_unsafe_code: true
+log_samples: true

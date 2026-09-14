@@ -229,11 +229,18 @@ def theseus_rebase(
     """
     pre = _backbone_state(source_pretrained)
     finetuned = _backbone_state(source_finetuned)
+    mismatched = [k for k, v in pre.items() if k in finetuned and v.shape != finetuned[k].shape]
+    if mismatched:
+        # A finetune that extended the vocabulary changes embed_tokens.weight's row
+        # count; theseus never transports embeddings anyway (see the docstring), so
+        # skipping them here is consistent, not a new limitation.
+        print(f"[theseus_rebase] skipping {len(mismatched)} shape-mismatched key(s), e.g. {mismatched[:3]}")
     delta = {
         k: finetuned[k] - v
         for k, v in pre.items()
         if k in finetuned
         and v.is_floating_point()
+        and v.shape == finetuned[k].shape
         and not any(fragment in k for fragment in _NEVER_TRANSPORT)
     }
     target_base = _backbone_state(target)

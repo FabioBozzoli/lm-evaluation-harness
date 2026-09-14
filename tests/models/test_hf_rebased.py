@@ -232,6 +232,26 @@ def test_theseus_rebases_backbone_across_widths() -> None:
     assert all(torch.isfinite(after[k]).all() for k in changed)
 
 
+def test_theseus_skips_shape_mismatched_embeddings_instead_of_crashing() -> None:
+    # A finetune that extended the vocabulary (e.g. new special/reasoning tokens) leaves
+    # embed_tokens.weight with more rows than the pretrained source's -- theseus never
+    # transports embeddings anyway, so this must be skipped, not raise a shape error.
+    source_pre, source_ft = _tiny_lm(32, seed=0), _tiny_lm(32, seed=1)
+    target = _tiny_lm(48, seed=2)
+    with torch.no_grad():
+        extra_row = source_ft.model.embed_tokens.weight[:1].clone()
+        source_ft.model.embed_tokens.weight = nn.Parameter(
+            torch.cat([source_ft.model.embed_tokens.weight, extra_row], dim=0)
+        )
+    source_ft.config.vocab_size = VOCAB + 1
+
+    n = theseus_rebase(
+        source_pre, source_ft, target, _loader(), _loader(),
+        device="cpu", n_batches=2, verbose=False, show_progress=False,
+    )
+    assert n > 0
+
+
 def _fit_steer(tmp_path, source_pre, source_ft, target, **overrides):
     params = {
         "feature_regime": "standard",
@@ -251,10 +271,18 @@ def _fit_steer(tmp_path, source_pre, source_ft, target, **overrides):
     )
 
 
-def test_steer_text_on_lm_head_shifts_logits_and_restores(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "stage_2",
+    [
+        pytest.param({"stage_2_strategy": "global_ridge"}, id="global_ridge"),
+        pytest.param({"stage_2_strategy": "global_mlp", "mlp_hidden_dim": 16, "mlp_epochs": 5}, id="global_mlp"),
+    ],
+)
+def test_steer_text_on_lm_head_shifts_logits_and_restores(tmp_path, stage_2) -> None:
     source_pre, source_ft = _tiny_lm(32, seed=0), _tiny_lm(32, seed=1)
     target = _tiny_lm(48, seed=2)
-    prepared = _fit_steer(tmp_path, source_pre, source_ft, target)
+    prepared = _fit_steer(tmp_path, source_pre, source_ft, target, **stage_2)
+    assert prepared["stage_2_strategy"] == stage_2["stage_2_strategy"]
     assert set(prepared["diagnostics"]) == {"stage0_test_acc", "stage1_test_acc", "stage2_test_acc"}
 
     x = torch.tensor(_rows(n=2, seed=5)[0]).unsqueeze(0)
