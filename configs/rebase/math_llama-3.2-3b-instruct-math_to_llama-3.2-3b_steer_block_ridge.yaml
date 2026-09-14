@@ -1,0 +1,45 @@
+# steer_text (linear regime + block_ridge) on math: correction fit on DART-Math token
+# positions, applied to meta-llama/Llama-3.2-3B's lm_head input while generating GSM8K
+# answers. Source A = Llama-3.2-3B-Instruct -> Llama-3.2-3B_math.
+#
+# A and B both have 28 blocks, so B's blocks are used one-to-one (no grouping).
+# The linear regime runs 29 forward-mode jvps (28 blocks + output) per calibration batch
+# through the 3B source, and keeps A's finetuned weights plus a linearization snapshot
+# on GPU: run it on a 96 GB card (see scripts/rebase/sbatch_rebase_math.sh).
+# For the cheaper path use feature_regime: standard + stage_2_strategy: global_ridge.
+#
+# TODO: set source_finetuned to the Llama-3.2-3B_math directory on the cluster
+# (Hugging Face format). meta-llama repos are gated: see the HF token note in the sbatch.
+
+model: rebased
+model_args:
+  pretrained: meta-llama/Llama-3.2-3B
+  dtype: bfloat16
+  source_pretrained: meta-llama/Llama-3.2-3B-Instruct
+  source_finetuned: /work/tesi_bcalderara/merge-and-rebase/checkpoints/Llama-3.2-3B_math  # TODO
+  method: steer_text
+  alpha: 1.0
+
+  calib_dataset: hkust-nlp/dart-math-hard
+  calib_config: default
+  calib_fields: query+response
+  calib_samples: 16
+  calib_test_samples: 4
+  calib_max_length: 256
+  calib_batch_size: 2
+
+  feature_regime: linear
+  stage_2_strategy: block_ridge
+  block_group_strategy: concat
+  block_ridge_mode: independent
+  total_support_examples: 2048
+  stage1_lambda: 1.0
+  ridge_lambda: 1.0
+  feature_cache_dir: .cache/steer_text_features
+  force_recompute_features: false
+  seed: 42
+
+tasks: [gsm8k]
+batch_size: 8
+device: cuda
+log_samples: true

@@ -1,0 +1,41 @@
+# theseus on math: the task vector (Llama-3.2-3B_math - Llama-3.2-3B-Instruct) is
+# transported into meta-llama/Llama-3.2-3B's backbone weights, then evaluated on GSM8K.
+# A and B share the architecture (28 layers, hidden 3072, tied embeddings), so the
+# alignment maps are square; the input embeddings (and the tied lm_head) are not
+# transported (see hf_rebased.theseus_rebase).
+#
+# TODO: set source_finetuned to the Llama-3.2-3B_math directory on the cluster
+# (Hugging Face format: the wrapper loads it with AutoModelForCausalLM.from_pretrained).
+# meta-llama repos are gated: see the HF token note in scripts/rebase/sbatch_rebase_math.sh.
+#
+# Memory: ~110 GB of CPU RAM (four float32 backbone copies + one float64 cross-covariance
+# per Linear, 8192 x 8192 for the MLP ones) and ~32 GB of GPU.
+#
+# Baseline for comparison (target without rebasing):
+#   python -m lm_eval run --config <this file> --model hf --model_args pretrained=meta-llama/Llama-3.2-3B,dtype=bfloat16
+
+model: rebased
+model_args:
+  pretrained: meta-llama/Llama-3.2-3B
+  dtype: bfloat16
+  source_pretrained: meta-llama/Llama-3.2-3B-Instruct
+  source_finetuned: /work/tesi_bcalderara/merge-and-rebase/checkpoints/Llama-3.2-3B_math  # TODO
+  method: theseus
+  alpha: 1.0
+
+  calib_dataset: hkust-nlp/dart-math-hard
+  calib_config: default
+  calib_fields: query+response
+  calib_samples: 64
+  calib_max_length: 512
+  calib_batch_size: 4
+
+  covariance_mode: activations
+  whiten_power: 0.0
+  center_acts: false
+  seed: 42
+
+tasks: [gsm8k]
+batch_size: 8
+device: cuda
+log_samples: true
