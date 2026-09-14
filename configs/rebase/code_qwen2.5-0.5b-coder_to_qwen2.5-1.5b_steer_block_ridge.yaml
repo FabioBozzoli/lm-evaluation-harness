@@ -1,0 +1,45 @@
+# steer_text, linear regime + block_ridge.
+# feature_regime: linear is required by block_ridge: the source delta is the
+# Taylor-linearized one, split per block with one forward-mode jvp per source block
+# (24 + output) per calibration batch through Qwen2.5-0.5B. That is the expensive part,
+# hence the small calib_samples / calib_max_length / calib_batch_size.
+#
+# B has 28 residual blocks and A 24, so B's blocks are grouped down to 24
+# (block_group_strategy: concat) before the per-block ridge fit.
+#
+# At eval time the correction is computed from B's live block outputs at every
+# position (block_ridge_correction_context), so it also applies during generation.
+
+model: rebased
+model_args:
+  pretrained: Qwen/Qwen2.5-1.5B
+  dtype: bfloat16
+  source_pretrained: Qwen/Qwen2.5-0.5B
+  source_finetuned: Qwen/Qwen2.5-Coder-0.5B
+  method: steer_text
+  alpha: 1.0
+
+  calib_dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
+  calib_config: default
+  calib_fields: problem+solution
+  calib_samples: 16
+  calib_test_samples: 4
+  calib_max_length: 256
+  calib_batch_size: 2
+
+  feature_regime: linear
+  stage_2_strategy: block_ridge
+  block_group_strategy: concat
+  block_ridge_mode: independent
+  total_support_examples: 2048
+  stage1_lambda: 1.0
+  ridge_lambda: 1.0
+  feature_cache_dir: .cache/steer_text_features
+  force_recompute_features: false
+  seed: 42
+
+tasks: [humaneval, mbpp]
+batch_size: 8
+device: cuda
+confirm_run_unsafe_code: true
+log_samples: true

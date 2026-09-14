@@ -1,0 +1,46 @@
+# steer_text, standard regime + global_ridge: the affordable steer_text path.
+# Target weights are never modified; the correction is added to the input of
+# Qwen2.5-1.5B's lm_head at every position (also during generation).
+#
+# lm_head plays the classification head: one example per next-token position of the
+# calibration text, the next token as its label. total_support_examples is the number
+# of token positions Stage 1/2 are fit on (few_shot is not available: every vocabulary
+# token would be a class).
+#
+# The log prints stage0/stage1/stage2 next-token accuracy on the held-out calibration
+# rows: stage2 > stage0 means the correction moves B toward A on this data.
+#
+# Features are cached under feature_cache_dir, keyed by source/target/calibration
+# settings; set force_recompute_features: true after changing the checkpoints in place.
+
+model: rebased
+model_args:
+  pretrained: Qwen/Qwen2.5-1.5B
+  dtype: bfloat16
+  source_pretrained: Qwen/Qwen2.5-0.5B
+  source_finetuned: Qwen/Qwen2.5-Coder-0.5B
+  method: steer_text
+  alpha: 1.0
+
+  calib_dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
+  calib_config: default
+  calib_fields: problem+solution
+  calib_samples: 64
+  calib_test_samples: 4
+  calib_max_length: 512
+  calib_batch_size: 4
+
+  feature_regime: standard
+  stage_2_strategy: global_ridge
+  total_support_examples: 4096
+  stage1_lambda: 1.0
+  ridge_lambda: 1.0
+  feature_cache_dir: .cache/steer_text_features
+  force_recompute_features: false
+  seed: 42
+
+tasks: [humaneval, mbpp]
+batch_size: 8
+device: cuda
+confirm_run_unsafe_code: true
+log_samples: true

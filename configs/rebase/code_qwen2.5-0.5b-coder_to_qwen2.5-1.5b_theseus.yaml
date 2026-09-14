@@ -1,0 +1,40 @@
+# theseus: the source task vector (Qwen2.5-Coder-0.5B - Qwen2.5-0.5B) is transported
+# into Qwen2.5-1.5B's backbone weights (24 -> 28 layers, hidden 896 -> 1536), then the
+# rebased model is evaluated on HumanEval + MBPP.
+#
+# Public checkpoints only: it checks the method on a real code finetune before you
+# swap source_finetuned for your own Magicoder finetune.
+#
+# Memory: theseus keeps one float64 cross-covariance per Linear (the MLP ones are
+# 4864 x 8960, ~350 MB each), so this pair needs ~30 GB of CPU RAM.
+# lm_head and the input embeddings are not transported (see hf_rebased.theseus_rebase).
+#
+# Baseline for comparison (target without rebasing):
+#   python -m lm_eval run --config <this file> --model hf --model_args pretrained=Qwen/Qwen2.5-1.5B,dtype=bfloat16
+
+model: rebased
+model_args:
+  pretrained: Qwen/Qwen2.5-1.5B
+  dtype: bfloat16
+  source_pretrained: Qwen/Qwen2.5-0.5B
+  source_finetuned: Qwen/Qwen2.5-Coder-0.5B
+  method: theseus
+  alpha: 1.0
+
+  calib_dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
+  calib_config: default
+  calib_fields: problem+solution
+  calib_samples: 64
+  calib_max_length: 512
+  calib_batch_size: 4
+
+  covariance_mode: activations
+  whiten_power: 0.0
+  center_acts: false
+  seed: 42
+
+tasks: [humaneval, mbpp]
+batch_size: 8
+device: cuda
+confirm_run_unsafe_code: true
+log_samples: true
