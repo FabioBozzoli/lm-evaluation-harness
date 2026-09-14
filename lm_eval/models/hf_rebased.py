@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import math
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -323,6 +324,28 @@ def _raw_next_token_features(
 
 
 @torch.no_grad()
+def next_token_loss(model: nn.Module, loader: DataLoader, device: torch.device) -> float:
+    """Mean next-token cross-entropy loss over ``loader``, running ``model``'s own real
+    forward pass (whatever hooks are currently active on it, if any -- callers control
+    that by entering/exiting a correction context around this call).
+    """
+    total, n_tokens = 0.0, 0
+    for batch in loader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+        rows = logits[:, :-1][_next_token_mask(attention_mask)]
+        total += F.cross_entropy(rows.float(), labels, reduction="sum").item()
+        n_tokens += int(labels.numel())
+    return total / n_tokens
+
+
+def _report_loss(label: str, loss: float) -> None:
+    print(f"[rebased] {label}: loss={loss:.4f}  ppl={math.exp(loss):.4f}")
+
+
+@torch.no_grad()
 def steering_loss_report(
     target: nn.Module,
     prepared: dict[str, Any],
@@ -356,7 +379,8 @@ def steering_loss_report(
     lm_head = target.get_output_embeddings()
     device = next(target.parameters()).device
 
-    totals = {"stage0": 0.0, "stage1_oracle": 0.0, "stage2": 0.0}
+    stage0_loss = next_token_loss(target, target_loader, device)
+    totals = {"stage1_oracle": 0.0, "stage2": 0.0}
     n_tokens = 0
 
     for source_batch, target_batch in zip(source_loader, target_loader, strict=True):
@@ -364,10 +388,6 @@ def steering_loss_report(
         attention_mask = target_batch["attention_mask"].to(device)
         labels = target_batch["labels"].to(device)
         n_tokens += int(labels.numel())
-
-        logits0 = target(input_ids=input_ids, attention_mask=attention_mask).logits
-        rows0 = logits0[:, :-1][_next_token_mask(attention_mask)]
-        totals["stage0"] += F.cross_entropy(rows0.float(), labels, reduction="sum").item()
 
         context = (
             block_ridge_correction_context(target, prepared, alpha=alpha)
@@ -390,8 +410,9 @@ def steering_loss_report(
         logits1 = lm_head(corrected)
         totals["stage1_oracle"] += F.cross_entropy(logits1.float(), labels, reduction="sum").item()
 
-    report = {f"{name}_loss": total / n_tokens for name, total in totals.items()}
-    report.update({key.replace("_loss", "_ppl"): float(torch.tensor(value).exp()) for key, value in report.items()})
+    report = {"stage0_loss": stage0_loss}
+    report.update({f"{name}_loss": total / n_tokens for name, total in totals.items()})
+    report.update({key.replace("_loss", "_ppl"): math.exp(value) for key, value in report.items()})
     return report
 
 
@@ -509,7 +530,18 @@ class RebasedHFLM(HFLM):
             )
 
         train_rows = token_rows(texts[: int(calib_samples)])
+        test_rows = token_rows(texts[int(calib_samples) :])
+        verbose = method_params.get("verbose", True)
         if method == "theseus":
+            # theseus writes A's transported delta straight into B's weights, so
+            # "before"/"after" are two different states of the *same* model measured
+            # at two points in time -- unlike steer_text's stage1/stage2 (a correction
+            # applied live, never baked into weights), there is no oracle/predicted
+            # split here: nothing is predicted at eval time, the transported weights
+            # already *are* A's aligned delta.
+            test_loader = loaders(test_rows)[1]
+            if verbose:
+                _report_loss("stage0 (B before theseus)", next_token_loss(self.model, test_loader, self.device))
             theseus_rebase(
                 *sources,
                 self.model,
@@ -520,8 +552,9 @@ class RebasedHFLM(HFLM):
                 target_pad_token_id=_pad_id(self.tokenizer),
                 **method_params,
             )
+            if verbose:
+                _report_loss("stage1 (B after theseus)", next_token_loss(self.model, test_loader, self.device))
         else:
-            test_rows = token_rows(texts[int(calib_samples) :])
             if train_rows[0] != train_rows[1] or test_rows[0] != test_rows[1]:
                 raise ValueError(
                     "steer_text pairs source and target token by token, so both must tokenize identically "
@@ -541,7 +574,7 @@ class RebasedHFLM(HFLM):
                 feature_cache_dir=str(feature_cache_dir or Path.home() / ".cache" / "lm_eval" / "steer_text"),
                 **method_params,
             )
-            if method_params.get("verbose", True):
+            if verbose:
                 # Loss/perplexity, not steer_text's own accuracy-over-the-full-vocabulary
                 # diagnostic: see steering_loss_report's docstring for why that one is
                 # misleading here. Computed before the permanent correction context below
@@ -549,18 +582,9 @@ class RebasedHFLM(HFLM):
                 report = steering_loss_report(
                     self.model, prepared, *sources, test_loaders, alpha=float(alpha)
                 )
-                print(
-                    "[rebased] stage0 (B uncorrected):     "
-                    f"loss={report['stage0_loss']:.4f}  ppl={report['stage0_ppl']:.4f}"
-                )
-                print(
-                    "[rebased] stage1 (oracle, A's real delta): "
-                    f"loss={report['stage1_oracle_loss']:.4f}  ppl={report['stage1_oracle_ppl']:.4f}"
-                )
-                print(
-                    f"[rebased] stage2 (live correction, alpha={alpha}): "
-                    f"loss={report['stage2_loss']:.4f}  ppl={report['stage2_ppl']:.4f}"
-                )
+                _report_loss("stage0 (B uncorrected)", report["stage0_loss"])
+                _report_loss("stage1 (oracle, A's real delta)", report["stage1_oracle_loss"])
+                _report_loss(f"stage2 (live correction, alpha={alpha})", report["stage2_loss"])
             # Kept open for the lifetime of this object: the pre-hook sits on the real
             # lm_head, so every _model_call/_model_generate is corrected.
             if prepared["stage_2_strategy"] == "block_ridge":

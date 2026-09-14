@@ -15,6 +15,7 @@ from lm_eval.models.hf_rebased import (  # noqa: E402
     block_ridge_correction_context,
     calibration_loader,
     fit_steer_text,
+    next_token_loss,
     steering_loss_report,
     theseus_rebase,
 )
@@ -220,11 +221,20 @@ def test_theseus_rebases_backbone_across_widths() -> None:
     source_pre, source_ft = _tiny_lm(32, seed=0), _tiny_lm(32, seed=1)
     target = _tiny_lm(48, seed=2)
     before = {k: v.clone() for k, v in target.state_dict().items()}
+    test_loader = _loader()
+    # theseus writes A's delta straight into B's weights: "before"/"after" is the same
+    # loss metric steering_loss_report uses, just two states of one model over time
+    # instead of a live correction vs. an oracle (see hf_rebased.__init__'s theseus branch).
+    loss_before = next_token_loss(target, test_loader, torch.device("cpu"))
 
     n = theseus_rebase(
         source_pre, source_ft, target, _loader(), _loader(),
         device="cpu", n_batches=2, verbose=False, show_progress=False,
     )
+
+    loss_after = next_token_loss(target, test_loader, torch.device("cpu"))
+    assert loss_before != loss_after
+    assert torch.isfinite(torch.tensor(loss_after))
 
     after = target.state_dict()
     changed = [k for k in before if not torch.equal(before[k], after[k])]
