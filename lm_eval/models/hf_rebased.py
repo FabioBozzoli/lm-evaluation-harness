@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from lm_eval.api.registry import register_model
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.utils_hf import get_dtype
 from lm_eval.rebase import get_method
 from lm_eval.rebase.adapters import (
     _NEVER_TRANSPORT,
@@ -354,6 +355,14 @@ class RebasedHFLM(HFLM):
         calib_test_samples: int = 4,
         calib_max_length: int = 256,
         calib_batch_size: int = 8,
+        # None = load both sources in the target's own resolved dtype (self.model.dtype,
+        # e.g. bfloat16): two float32 copies of a 3B model cost ~12 GB more GPU memory
+        # than bf16 ones, a real cause of CUDA OOM on this pair. theseus's weight delta
+        # is computed on values upcast to float32 right when read off the state dict
+        # (see _backbone_state), so it ends up at bf16 *precision* either way when the
+        # sources are loaded in bf16 -- pass calib_dtype: float32 explicitly if that
+        # precision loss on a small delta is a concern and GPU memory allows it.
+        calib_dtype: str | None = None,
         feature_cache_dir: str | None = None,
         **kwargs,
     ) -> None:
@@ -376,12 +385,21 @@ class RebasedHFLM(HFLM):
 
         super().__init__(pretrained=pretrained, **kwargs)
 
+        import transformers
+        from packaging.version import parse as vparse
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         device = str(self.device)
         source_tokenizer = AutoTokenizer.from_pretrained(source_pretrained)
+        # dtype= only exists from transformers>=4.56; older versions silently ignore it
+        # (it reaches the model's __init__ unconsumed and raises TypeError) and need
+        # torch_dtype= instead -- same check HFLM.build itself uses.
+        dtype_arg = "dtype" if vparse(transformers.__version__) >= vparse("4.56.0") else "torch_dtype"
+        resolved_dtype = get_dtype(calib_dtype) if calib_dtype is not None else self.model.dtype
         sources = [
-            AutoModelForCausalLM.from_pretrained(path).to(device=self.device, dtype=torch.float32).eval()
+            AutoModelForCausalLM.from_pretrained(path, **{dtype_arg: resolved_dtype})
+            .to(device=self.device)
+            .eval()
             for path in (source_pretrained, source_finetuned)
         ]
 
