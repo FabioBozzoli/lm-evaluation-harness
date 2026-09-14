@@ -1,0 +1,61 @@
+# theseus on math, cross-family: Llama-3.2-3B-Instruct -> Llama-3.2-3B_math (28 layers,
+# hidden 3072) transported into meta-llama/Llama-3.1-8B (32 layers, hidden 4096).
+#
+# covariance_mode: data_free (theseus's own default is "activations" -- overridden here).
+# Aligns each layer from weight SVDs alone, no calibration forward passes, no per-layer
+# activation covariances kept in memory. "activations" mode's covariances would add an
+# estimated 150-250+ GB of RAM at this model size (see the RAM note below) -- switch back
+# with covariance_mode: activations only if that memory is actually available.
+#
+# Depth mismatch, name-based matching only: theseus matches layers by NAME ("layers.0",
+# "layers.1", ...), so it only ever writes into target's layers 0-27 (as many as source
+# has) -- B's layers 28-31 are left at their pretrained values entirely, never visited,
+# not zeroed. The sibling steer_text/block_ridge config instead groups B's 32 blocks down
+# to 28 and touches all of them -- a real behavioral difference between the two methods
+# on this pair, not a bug in either.
+#
+# Memory -- calculated from the method's own pattern (three float32 CPU backbone copies,
+# no giant covariances in data_free mode), not measured on real hardware. Request
+# generously and check actual usage with `seff <jobid>` after the run so later runs can
+# be sized tighter:
+# - VRAM: B (8.03B params, bf16) ~16 GB + source pretrained + source finetuned (3.21B
+#   params each, bf16) ~6.4 GB each = ~29 GB resident together during prepare()/
+#   transport(). A 45 GB card should have enough headroom for activation memory and
+#   allocator fragmentation on top of that; 96 GB is the safe fallback.
+# - RAM: _backbone_state() reads each of the three models' backbone state dict as
+#   float32 on CPU (source pretrained ~13 GB + source finetuned ~13 GB + target ~32 GB)
+#   plus the task-vector delta (~11 GB) =~ 70 GB. Rounded up generously to 128 GB below.
+#
+# TODO: set source_finetuned to the Llama-3.2-3B_math directory on the cluster
+# (Hugging Face format: config.json + model.safetensors.index.json + shards -- the
+# wrapper loads it with AutoModelForCausalLM.from_pretrained). meta-llama repos are
+# gated: see the HF token note in the matching sbatch script.
+
+model: rebased
+model_args:
+  pretrained: meta-llama/Llama-3.1-8B
+  dtype: bfloat16
+  source_pretrained: meta-llama/Llama-3.2-3B-Instruct
+  source_finetuned: /work/intesasanpaolo_phd/lm-eval/checkpoints/Llama-3.2-3B_math  # TODO
+  method: theseus
+  alpha: 1.0
+
+  # Tokenized but never fed to theseus in covariance_mode: data_free (no calibration
+  # forward pass happens in that mode) -- kept here only so switching back to
+  # covariance_mode: activations needs no other change.
+  calib_dataset: hkust-nlp/dart-math-hard
+  calib_config: default
+  calib_fields: query+response
+  calib_samples: 64
+  calib_max_length: 512
+  calib_batch_size: 4
+
+  covariance_mode: data_free
+  whiten_power: 0.0
+  center_acts: false
+  seed: 42
+
+tasks: [gsm8k]
+batch_size: 4
+device: cuda
+log_samples: true
