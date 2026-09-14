@@ -9,7 +9,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --constraint="gpu_A40_45G|gpu_L40S_45G|gpu_RTXPro6000B_96G"
+#SBATCH --constraint="gpu_A40_45G|gpu_L40S_45G"
 #SBATCH --account=intesasanpaolo_phd
 #SBATCH --partition=all_usr_prod
 

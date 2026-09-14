@@ -9,7 +9,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=192G
-#SBATCH --constraint="gpu_A40_45G|gpu_L40S_45G|gpu_RTXPro6000B_96G"
+#SBATCH --constraint="gpu_A40_45G|gpu_L40S_45G"
 #SBATCH --account=intesasanpaolo_phd
 #SBATCH --partition=all_usr_prod
 #SBATCH --array=0-2
@@ -23,12 +23,16 @@
 # and the tokenizer, so no block grouping is needed.
 #
 # Resources (3B models):
-# - GPU: the two source models are loaded in float32 (~13 GB each) next to B in bf16,
-#   ~32 GB before evaluation -> 24 GB cards are excluded above.
-# - steer_block_ridge also keeps A's finetuned weights and the linearization snapshot on
-#   GPU (~26 GB more): submit that task on the 96 GB cards only, e.g.
-#     sbatch --array=2 --constraint=gpu_RTXPro6000B_96G scripts/rebase/sbatch_rebase_math.sh
-#   and the others with --array=0-1.
+# - GPU: the two source models load in the target's own dtype (bf16 by default, ~6.4 GB
+#   each) next to B in bf16, ~29 GB before evaluation -> 24 GB cards are excluded above.
+# - steer_block_ridge also runs forward-mode AD (jvp) on the source model, extra GPU
+#   overhead beyond that base. The 96 GB gpu_RTXPro6000B card (Blackwell, sm_120) is NOT
+#   usable on this cluster's current PyTorch (2.1.2+cu121, compiled up to sm_90 only --
+#   jobs on it fail with "no kernel image is available for execution on the device"),
+#   so that task now runs on the same 45 GB cards as everything else, with less memory
+#   headroom than originally intended for it -- if --array=2 OOMs, lower
+#   method_params.calib_batch_size/calib_max_length in the steer_block_ridge config, or
+#   ask about upgrading PyTorch to a build with sm_120 support (CUDA 12.4+/12.6+).
 # - CPU: theseus holds four float32 copies of the backbone state (A pre/finetuned,
 #   B base, delta) plus float64 covariances for every Linear (~110 GB) -> --mem=192G.
 #

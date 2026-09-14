@@ -9,7 +9,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=96G
-#SBATCH --constraint="gpu_RTXPro6000B_96G"
+#SBATCH --constraint="gpu_A40_45G|gpu_L40S_45G"
 #SBATCH --account=intesasanpaolo_phd
 #SBATCH --partition=all_usr_prod
 
@@ -19,13 +19,23 @@
 # finetuned head and B's) that must be resolved before this run will complete --
 # do not submit until that is settled.
 #
+# GPU: this was originally constrained to the 96 GB gpu_RTXPro6000B card alone, the
+# safer choice for this untested-scale combination (8B target, jvp on a 3B source).
+# That card (Blackwell, sm_120) turned out NOT usable on this cluster's current
+# PyTorch (2.1.2+cu121, compiled up to sm_90 only -- jobs on it fail with "no kernel
+# image is available for execution on the device"), so this now runs on 45 GB cards
+# instead, with real OOM risk given the estimate below is untested. If it OOMs, lower
+# calib_batch_size (already 2) to 1 and/or calib_max_length (already 256) in the
+# matching config, or ask about upgrading PyTorch to a build with sm_120 support
+# (CUDA 12.4+/12.6+), which would reopen the 96 GB card as an option.
+#
 # Memory (calculated, not measured -- see the config file for the full breakdown):
 # - VRAM  ~29 GB base (B bf16 ~16 GB + two 3B-family sources bf16 ~6.4 GB each) plus
-#   forward-mode-AD (jvp) overhead on the 3B source model. This exact combination (8B
-#   target, jvp source) has not been run before -- constrained to the 96 GB card only,
-#   above, rather than guessing a 45 GB card would be enough.
-# - RAM   ~15-25 GB estimated (cached calibration features, not theseus-sized
-#   covariances). --mem=96G above is a generous rounding, not a measurement.
+#   forward-mode-AD (jvp) overhead on the 3B source model, both untested at this scale.
+# - RAM   ~35-50 GB estimated: cached calibration features (~15-25 GB) plus Stage 1's
+#   pinv(B's [128256, 4096] lm_head), whose SVD transiently needs ~15-20 GB more on
+#   top of the ~2-5 GB features alone estimate this had earlier. --mem=96G above still
+#   has headroom over this corrected estimate.
 # After a run, check `seff <jobid>` (peak RSS, GPU util) to size the next one tighter.
 #
 # Before submitting:

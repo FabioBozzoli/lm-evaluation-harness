@@ -18,12 +18,15 @@
 # caveat and its RAM breakdown (this method's CPU cost is much lower, see below):
 # - VRAM: same ~29 GB base as theseus (B 8B bf16 + the two 3B-family sources bf16),
 #   plus the linear regime's forward-mode-AD (jvp) overhead, run on the *source* (3B)
-#   model, one block at a time. This exact combination (8B target, jvp source) has not
-#   been run before -- recommend 96 GB; resubmit with
-#   --constraint=gpu_RTXPro6000B_96G if a 45 GB card OOMs.
-# - RAM: dominated by cached calibration features (float64, sized by calib_samples x
-#   tokens x hidden x num_blocks), not by theseus-sized covariance matrices -- roughly
-#   15-25 GB at the calib_samples below. Rounded up generously to 96 GB below.
+#   model, one block at a time. This exact combination (8B target, jvp source) is
+#   untested. The 96 GB gpu_RTXPro6000B card (Blackwell, sm_120) that would have given
+#   the most headroom is NOT usable on this cluster's current PyTorch (2.1.2+cu121,
+#   compiled up to sm_90 only), so the matching sbatch runs this on 45 GB cards instead
+#   -- see its comment for what to do if that OOMs.
+# - RAM: cached calibration features (float64, sized by calib_samples x tokens x
+#   hidden x num_blocks, ~15-25 GB) plus Stage 1's pinv(B's [128256, 4096] lm_head),
+#   whose SVD transiently needs ~15-20 GB more -- roughly 35-50 GB total. Rounded up
+#   generously to 96 GB below.
 #
 # TODO: set source_finetuned to the Llama-3.2-3B_math directory on the cluster
 # (Hugging Face format). meta-llama repos are gated: see the HF token note in the
