@@ -19,9 +19,10 @@
 # finetuned head and B's) that must be resolved before this run will complete --
 # do not submit until that is settled.
 #
-# Runs the target zeroshot baseline (plain B, no rebasing) first, same config/task
-# settings, so its exact_match prints in this same log next to the rebased run's --
-# roughly doubles GSM8K generation time; --time=24:00:00 below should still be ample.
+# For zeroshot baselines (B alone, A finetuned alone -- no rebasing), use the
+# standalone scripts sbatch_zeroshot_llama-3.1-8b_gsm8k.sh and
+# sbatch_zeroshot_llama-3.2-3b-math_gsm8k.sh instead: plain lm_eval runs, no
+# dependency on this rebase config.
 #
 # GPU: this was originally constrained to the 96 GB gpu_RTXPro6000B card alone, the
 # safer choice for this untested-scale combination (8B target, jvp on a 3B source).
@@ -74,18 +75,9 @@ export HF_HOME="${WORK_ROOT}/hf_cache"
 # export HF_TOKEN=...  # alternative to huggingface-cli login for the gated meta-llama repos
 
 CONFIG="configs/rebase/math_llama-3.2-3b-instruct-math_to_llama-3.1-8b_steer_block_ridge.yaml"
-OUTPUT_ROOT="${WORK_ROOT}/lm_eval_results/math_llama-3.2-3b_to_llama-3.1-8b/steer_block_ridge"
+OUTPUT_PATH="${WORK_ROOT}/lm_eval_results/math_llama-3.2-3b_to_llama-3.1-8b/steer_block_ridge"
 
-# Same log, same task/generation settings from the config (--model/--model_args below
-# override only the model): both exact_match tables print here, zeroshot then rebased.
-echo "--- Step 1: target zeroshot baseline (B=Llama-3.1-8B, no rebasing) ---"
+echo "--- steer_text block_ridge: A=Llama-3.2-3B-Instruct -> Llama-3.2-3B_math, B=Llama-3.1-8B ---"
 python -m lm_eval run \
   --config "$CONFIG" \
-  --model hf \
-  --model_args pretrained=meta-llama/Llama-3.1-8B,dtype=bfloat16 \
-  --output_path "${OUTPUT_ROOT}/zeroshot_baseline"
-
-echo "--- Step 2: steer_text block_ridge: A=Llama-3.2-3B-Instruct -> Llama-3.2-3B_math, B=Llama-3.1-8B ---"
-python -m lm_eval run \
-  --config "$CONFIG" \
-  --output_path "${OUTPUT_ROOT}/rebased"
+  --output_path "$OUTPUT_PATH"
