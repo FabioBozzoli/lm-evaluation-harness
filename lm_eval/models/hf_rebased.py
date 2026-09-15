@@ -500,10 +500,16 @@ class RebasedHFLM(HFLM):
         # torch_dtype= instead -- same check HFLM.build itself uses.
         dtype_arg = "dtype" if vparse(transformers.__version__) >= vparse("4.56.0") else "torch_dtype"
         resolved_dtype = get_dtype(calib_dtype) if calib_dtype is not None else self.model.dtype
+        # device_map (not .to(device) after a plain from_pretrained) mirrors exactly how
+        # HFLM itself loads the target (huggingface.py's _get_accelerate_args): it makes
+        # transformers materialize weights straight from the checkpoint via accelerate's
+        # meta-device path, skipping the random weight *initialization* a plain
+        # from_pretrained does first (real CPU cost on a multi-billion-parameter model,
+        # done twice here) and the extra full CPU->GPU tensor copy .to() would add on top.
+        # Without this, loading two source models this size can take on the order of
+        # tens of minutes before anything else in prepare()/theseus even starts.
         sources = [
-            AutoModelForCausalLM.from_pretrained(path, **{dtype_arg: resolved_dtype})
-            .to(device=self.device)
-            .eval()
+            AutoModelForCausalLM.from_pretrained(path, **{dtype_arg: resolved_dtype}, device_map={"": device}).eval()
             for path in (source_pretrained, source_finetuned)
         ]
 
