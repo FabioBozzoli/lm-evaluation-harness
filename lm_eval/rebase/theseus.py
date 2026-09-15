@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import time
 from tqdm import tqdm
 
 from .patch_openclip_attention import merge_openclip_vit_attn, split_openclip_vit_attn
@@ -506,7 +507,11 @@ def collect_activations(
 
 
 def _compute_procrustes_map_from_cov(cov: torch.Tensor) -> torch.Tensor:
-    u, _, v_h = torch.linalg.svd(cov.double(), full_matrices=False)
+    try:
+        u, _, v_h = torch.linalg.svd(cov.float(), full_matrices=False, driver="gesvdj")
+    except RuntimeError as e:
+        import ipdb; ipdb.set_trace()
+        return None
     return (u @ v_h).float()
 
 
@@ -542,9 +547,10 @@ def _compute_alignment_map(
     cov = store.get_covariance(center=center)
     if cov is None:
         return None
+    cov = cov.to(device="cuda")
     if whiten_power > 0.0:
-        a_gram = store.get_a_gram(center=center, epsilon=whiten_eps)
-        b_gram = store.get_b_gram(center=center, epsilon=whiten_eps)
+        a_gram = store.get_a_gram(center=center, epsilon=whiten_eps).to(device="cuda")
+        b_gram = store.get_b_gram(center=center, epsilon=whiten_eps).to(device="cuda")
         if a_gram is not None and b_gram is not None:
             cov = _partially_whiten_covariance(
                 cov,
@@ -557,7 +563,7 @@ def _compute_alignment_map(
             logger.warning(
                 "Theseus whitening requested but Gram statistics were unavailable; falling back to raw Procrustes."
             )
-    return _compute_procrustes_map_from_cov(cov)
+    return _compute_procrustes_map_from_cov(cov.to("cuda"))
 
 
 def _resolve_covariance_mode(mode: str) -> str:
@@ -579,9 +585,11 @@ def _compute_alignment_map_from_matrix_proxies(
     whiten_power: float,
     whiten_eps: float,
 ) -> torch.Tensor:
-    source = source_proxy.detach().cpu().to(torch.float64)
-    target = target_proxy.detach().cpu().to(torch.float64)
+    #source = source_proxy.detach().cpu().to(torch.float64)
+    #target = target_proxy.detach().cpu().to(torch.float64)
 
+    source = source_proxy.detach().to(device="cuda")
+    target = target_proxy.detach().to(device="cuda")
     if side == "input":
         a_gram = source.T @ source
         b_gram = target.T @ target
@@ -601,7 +609,7 @@ def _compute_alignment_map_from_matrix_proxies(
     target_basis = u_b[:, :rank] * scale_b.unsqueeze(0)
     cov = source_basis @ target_basis.T
 
-    return _compute_procrustes_map_from_cov(cov)
+    return _compute_procrustes_map_from_cov(cov.to("cuda"))
 
 
 def _transport_weight(delta_weight: torch.Tensor, t_in: torch.Tensor, t_out: torch.Tensor, *, key: str) -> torch.Tensor:
@@ -800,18 +808,24 @@ def _precompute_transforms(
             in_store = activation_registry.get(in_key)
             out_store = activation_registry.get(out_key)
             if in_store is not None and out_store is not None:
+                start_time = time.time()
                 t_in = _compute_alignment_map(
                     in_store,
                     center=center_acts,
                     whiten_power=whiten_power,
                     whiten_eps=whiten_eps,
                 )
+                end_time = time.time()
+                print(f"Theseus align: {key} - Time taken: {end_time - start_time:.2f} seconds")
+                start_time = time.time()
                 t_out = _compute_alignment_map(
                     out_store,
                     center=center_acts,
                     whiten_power=whiten_power,
                     whiten_eps=whiten_eps,
                 )
+                end_time = time.time()
+                print(f"Theseus align: {key} - Time taken: {end_time - start_time:.2f} seconds")
                 if t_in is not None and t_out is not None:
                     transforms_by_key[key] = _LayerTransform(kind="weight", t_in=t_in, t_out=t_out)
                     continue
@@ -969,7 +983,7 @@ def _apply_transforms_to_visual_delta(
                     logger.warning("Theseus transport failed for %s: %s", key, exc)
             elif transform.kind == "bias" and delta_source.ndim == 1 and transform.t_out is not None:
                 try:
-                    transported = _transport_bias(delta_source.float().cpu(), transform.t_out)
+                    transported = _transport_bias(delta_source.float().to(device="cuda"), transform.t_out)
                 except ValueError as exc:
                     logger.warning("Theseus vector transport failed for %s: %s", key, exc)
 
