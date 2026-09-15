@@ -17,6 +17,12 @@
 # B = meta-llama/Llama-3.1-8B, aligned data-free (weight SVDs, no calibration forward
 # passes -- see the config's comment on why "activations" mode is not the default here).
 #
+# Runs the target zeroshot baseline (plain B, no rebasing) first, same config/task
+# settings, so its exact_match prints in this same log next to the rebased run's --
+# roughly doubles GSM8K generation time on top of theseus's own prepare()/transport()
+# cost; --time=24:00:00 below should still be ample, but check the first Step 1 result
+# before assuming Step 2 will also finish in time on a first run.
+#
 # Memory (calculated, not measured -- see the config file for the full breakdown):
 # - VRAM  ~29 GB base (B bf16 ~16 GB + two 3B-family sources bf16 ~6.4 GB each).
 #   --constraint above targets 45 GB cards. The 96 GB gpu_RTXPro6000B card (Blackwell,
@@ -61,9 +67,20 @@ export HF_HOME="${WORK_ROOT}/hf_cache"
 # export HF_TOKEN=...  # alternative to huggingface-cli login for the gated meta-llama repos
 
 CONFIG="configs/rebase/math_llama-3.2-3b-instruct-math_to_llama-3.1-8b_theseus.yaml"
-OUTPUT_PATH="${WORK_ROOT}/lm_eval_results/math_llama-3.2-3b_to_llama-3.1-8b/theseus"
+OUTPUT_ROOT="${WORK_ROOT}/lm_eval_results/math_llama-3.2-3b_to_llama-3.1-8b/theseus"
 
-echo "--- theseus: A=Llama-3.2-3B-Instruct -> Llama-3.2-3B_math, B=Llama-3.1-8B ---"
+# Same log, same task/generation settings from the config (--model/--model_args below
+# override only the model, everything else -- tasks, batch_size, num_fewshot from the
+# task itself -- comes from $CONFIG): both exact_match tables print here, so you can
+# compare zeroshot vs. rebased without cross-referencing two separate job logs.
+echo "--- Step 1: target zeroshot baseline (B=Llama-3.1-8B, no rebasing) ---"
 python -m lm_eval run \
   --config "$CONFIG" \
-  --output_path "$OUTPUT_PATH"
+  --model hf \
+  --model_args pretrained=meta-llama/Llama-3.1-8B,dtype=bfloat16 \
+  --output_path "${OUTPUT_ROOT}/zeroshot_baseline"
+
+echo "--- Step 2: theseus: A=Llama-3.2-3B-Instruct -> Llama-3.2-3B_math, B=Llama-3.1-8B ---"
+python -m lm_eval run \
+  --config "$CONFIG" \
+  --output_path "${OUTPUT_ROOT}/rebased"

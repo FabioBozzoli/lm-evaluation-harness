@@ -19,6 +19,10 @@
 # vocab-width mismatch between A's finetuned head and B's, same issue as the
 # block_ridge variant) that must be resolved before this run will complete.
 #
+# Runs the target zeroshot baseline (plain B, no rebasing) first, same config/task
+# settings, so its exact_match prints in this same log next to the rebased run's --
+# roughly doubles GSM8K generation time; --time=24:00:00 below should still be ample.
+#
 # Memory (calculated, not measured -- see the config file for the full breakdown):
 # - VRAM  ~32-35 GB (B bf16 ~16 GB + two 3B-family sources bf16 ~6.4 GB each + a
 #   normal forward pass's activation memory -- no jvp doubling, unlike block_ridge).
@@ -60,9 +64,18 @@ export HF_HOME="${WORK_ROOT}/hf_cache"
 # export HF_TOKEN=...  # alternative to huggingface-cli login for the gated meta-llama repos
 
 CONFIG="configs/rebase/math_llama-3.2-3b-instruct-math_to_llama-3.1-8b_steer_global_ridge.yaml"
-OUTPUT_PATH="${WORK_ROOT}/lm_eval_results/math_llama-3.2-3b_to_llama-3.1-8b/steer_global_ridge"
+OUTPUT_ROOT="${WORK_ROOT}/lm_eval_results/math_llama-3.2-3b_to_llama-3.1-8b/steer_global_ridge"
 
-echo "--- steer_text global_ridge: A=Llama-3.2-3B-Instruct -> Llama-3.2-3B_math, B=Llama-3.1-8B ---"
+# Same log, same task/generation settings from the config (--model/--model_args below
+# override only the model): both exact_match tables print here, zeroshot then rebased.
+echo "--- Step 1: target zeroshot baseline (B=Llama-3.1-8B, no rebasing) ---"
 python -m lm_eval run \
   --config "$CONFIG" \
-  --output_path "$OUTPUT_PATH"
+  --model hf \
+  --model_args pretrained=meta-llama/Llama-3.1-8B,dtype=bfloat16 \
+  --output_path "${OUTPUT_ROOT}/zeroshot_baseline"
+
+echo "--- Step 2: steer_text global_ridge: A=Llama-3.2-3B-Instruct -> Llama-3.2-3B_math, B=Llama-3.1-8B ---"
+python -m lm_eval run \
+  --config "$CONFIG" \
+  --output_path "${OUTPUT_ROOT}/rebased"
