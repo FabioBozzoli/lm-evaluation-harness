@@ -39,6 +39,16 @@ def _resolve_device(device: str | torch.device) -> torch.device:
     return dev
 
 
+def _compute_device() -> torch.device:
+    """Where the heavy linear algebra runs (covariance products, SVD/eigh, transport).
+
+    Results that must persist across keys (activation statistics, per-layer transforms)
+    are stored on CPU: kept on GPU, the MLP maps alone (e.g. 8192x14336 per projection,
+    several per layer) would add tens of GB of VRAM on top of the loaded models.
+    """
+    return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+
 def _extract_model_inputs(batch: Any) -> torch.Tensor:
     if torch.is_tensor(batch):
         return batch
@@ -299,29 +309,35 @@ class ActivationStore:
         self.h_b_list: list[torch.Tensor] = []
 
     def update(self, batch_a: torch.Tensor, batch_b: torch.Tensor) -> None:
-        a = batch_a.detach().cpu().to(torch.float64)
-        b = batch_b.detach().cpu().to(torch.float64)
+        # Products computed on GPU, accumulated statistics stored on CPU (float64).
+        dev = _compute_device()
+        a = batch_a.detach().to(device=dev, dtype=torch.float64)
+        b = batch_b.detach().to(device=dev, dtype=torch.float64)
 
         if self.store_raw:
-            self.h_a_list.append(a.float())
-            self.h_b_list.append(b.float())
+            self.h_a_list.append(a.float().cpu())
+            self.h_b_list.append(b.float().cpu())
+
+        at_b = (a.T @ b).cpu()
+        sum_a = a.sum(dim=0).cpu()
+        sum_b = b.sum(dim=0).cpu()
+        at_a = (a.T @ a).cpu() if self.store_a_gram else None
+        bt_b = (b.T @ b).cpu() if self.store_b_gram else None
 
         if self.at_b is None:
-            self.at_b = a.T @ b
-            self.sum_a = a.sum(dim=0)
-            self.sum_b = b.sum(dim=0)
-            if self.store_a_gram:
-                self.at_a = a.T @ a
-            if self.store_b_gram:
-                self.bt_b = b.T @ b
+            self.at_b = at_b
+            self.sum_a = sum_a
+            self.sum_b = sum_b
+            self.at_a = at_a
+            self.bt_b = bt_b
         else:
-            self.at_b += a.T @ b
-            self.sum_a += a.sum(dim=0)
-            self.sum_b += b.sum(dim=0)
-            if self.store_a_gram and self.at_a is not None:
-                self.at_a += a.T @ a
-            if self.store_b_gram and self.bt_b is not None:
-                self.bt_b += b.T @ b
+            self.at_b += at_b
+            self.sum_a += sum_a
+            self.sum_b += sum_b
+            if self.at_a is not None and at_a is not None:
+                self.at_a += at_a
+            if self.bt_b is not None and bt_b is not None:
+                self.bt_b += bt_b
 
         self.n_samples += int(a.shape[0])
 
@@ -507,12 +523,19 @@ def collect_activations(
 
 
 def _compute_procrustes_map_from_cov(cov: torch.Tensor) -> torch.Tensor:
-    try:
-        u, _, v_h = torch.linalg.svd(cov.float(), full_matrices=False, driver="gesvdj")
-    except RuntimeError as e:
-        import ipdb; ipdb.set_trace()
-        return None
-    return (u @ v_h).float()
+    """Orthogonal Procrustes map U V^T, computed on the compute device, returned on CPU."""
+    cov = cov.to(device=_compute_device(), dtype=torch.float32)
+    if cov.is_cuda:
+        try:
+            # gesvdj (Jacobi) is much faster on GPU but may fail to converge on
+            # ill-conditioned matrices; fall back to the default GPU driver then.
+            u, _, v_h = torch.linalg.svd(cov, full_matrices=False, driver="gesvdj")
+        except RuntimeError as exc:
+            logger.warning("Theseus: gesvdj SVD failed (%s); retrying with the default driver.", exc)
+            u, _, v_h = torch.linalg.svd(cov, full_matrices=False)
+    else:
+        u, _, v_h = torch.linalg.svd(cov, full_matrices=False)
+    return (u @ v_h).float().cpu()
 
 
 def _matrix_power_psd(matrix: torch.Tensor, *, power: float, eps: float) -> torch.Tensor:
@@ -547,15 +570,16 @@ def _compute_alignment_map(
     cov = store.get_covariance(center=center)
     if cov is None:
         return None
-    cov = cov.to(device="cuda")
+    dev = _compute_device()
+    cov = cov.to(device=dev)
     if whiten_power > 0.0:
-        a_gram = store.get_a_gram(center=center, epsilon=whiten_eps).to(device="cuda")
-        b_gram = store.get_b_gram(center=center, epsilon=whiten_eps).to(device="cuda")
+        a_gram = store.get_a_gram(center=center, epsilon=whiten_eps)
+        b_gram = store.get_b_gram(center=center, epsilon=whiten_eps)
         if a_gram is not None and b_gram is not None:
             cov = _partially_whiten_covariance(
                 cov,
-                a_gram=a_gram,
-                b_gram=b_gram,
+                a_gram=a_gram.to(device=dev),
+                b_gram=b_gram.to(device=dev),
                 power=whiten_power,
                 eps=whiten_eps,
             )
@@ -563,7 +587,7 @@ def _compute_alignment_map(
             logger.warning(
                 "Theseus whitening requested but Gram statistics were unavailable; falling back to raw Procrustes."
             )
-    return _compute_procrustes_map_from_cov(cov.to("cuda"))
+    return _compute_procrustes_map_from_cov(cov)
 
 
 def _resolve_covariance_mode(mode: str) -> str:
@@ -585,11 +609,11 @@ def _compute_alignment_map_from_matrix_proxies(
     whiten_power: float,
     whiten_eps: float,
 ) -> torch.Tensor:
-    #source = source_proxy.detach().cpu().to(torch.float64)
-    #target = target_proxy.detach().cpu().to(torch.float64)
-
-    source = source_proxy.detach().to(device="cuda")
-    target = target_proxy.detach().to(device="cuda")
+    # float64 is required, not just precision: source weights read off a live bf16
+    # model would reach torch.linalg.svd in bfloat16, which it does not support.
+    dev = _compute_device()
+    source = source_proxy.detach().to(device=dev, dtype=torch.float64)
+    target = target_proxy.detach().to(device=dev, dtype=torch.float64)
     if side == "input":
         a_gram = source.T @ source
         b_gram = target.T @ target
@@ -609,7 +633,7 @@ def _compute_alignment_map_from_matrix_proxies(
     target_basis = u_b[:, :rank] * scale_b.unsqueeze(0)
     cov = source_basis @ target_basis.T
 
-    return _compute_procrustes_map_from_cov(cov.to("cuda"))
+    return _compute_procrustes_map_from_cov(cov)
 
 
 def _transport_weight(delta_weight: torch.Tensor, t_in: torch.Tensor, t_out: torch.Tensor, *, key: str) -> torch.Tensor:
@@ -969,6 +993,9 @@ def _apply_transforms_to_visual_delta(
 
         transform = transforms_by_key.get(key)
         if transform is not None:
+            # Every operand of the transport moved to the same compute device: transforms
+            # are stored on CPU (see _compute_device), the delta may live anywhere.
+            dev = _compute_device()
             if (
                 transform.kind == "weight"
                 and delta_source.ndim == 2
@@ -977,14 +1004,19 @@ def _apply_transforms_to_visual_delta(
             ):
                 try:
                     transported = _transport_weight(
-                        delta_source.float().cpu(), transform.t_in, transform.t_out, key=key
+                        delta_source.to(device=dev, dtype=torch.float32),
+                        transform.t_in.to(device=dev),
+                        transform.t_out.to(device=dev),
+                        key=key,
                     )
                 except RuntimeError as exc:
                     logger.warning("Theseus transport failed for %s: %s", key, exc)
             elif transform.kind == "bias" and delta_source.ndim == 1 and transform.t_out is not None:
                 try:
-                    transported = _transport_bias(delta_source.float().to(device="cuda"), transform.t_out)
-                except ValueError as exc:
+                    transported = _transport_bias(
+                        delta_source.to(device=dev, dtype=torch.float32), transform.t_out.to(device=dev)
+                    )
+                except (ValueError, RuntimeError) as exc:
                     logger.warning("Theseus vector transport failed for %s: %s", key, exc)
 
         if transported.shape != target_ref.shape:
