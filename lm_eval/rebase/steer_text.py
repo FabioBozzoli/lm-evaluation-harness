@@ -499,6 +499,9 @@ class SteerTextRebase:
         w_a, _ = _head_tensors(source_model)
         w_b, b_b = _head_tensors(target_model)
 
+        print(f"w_a.shape = {w_a.shape}, w_b.shape = {w_b.shape}")
+        if w_a.shape[0] != w_b.shape[0]: w_a = w_a[:w_b.shape[0]]
+
         n_source_params = sum(p.numel() for p in source_model.parameters())
         if feature_regime == "linear" and n_source_params > _LINEAR_REGIME_PARAM_WARN:
             print(

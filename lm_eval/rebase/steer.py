@@ -558,7 +558,7 @@ def _collect_standard_split(
     for (x_a, y_a), (x_b, _y_b) in zip(_iter_batches(source_loader, device=device), _iter_batches(target_loader, device=device), strict=True):
         f_a_ft = _l2_normalize(clf_source_finetuned_visual(x_a))
         f_a_pre = _l2_normalize(clf_source_pretrained_visual(x_a))
-        features_a.append(f_a_ft.cpu())
+        features_a.append(f_a_pre.cpu())
         delta_a.append((f_a_ft - f_a_pre).cpu())
         features_b.append(_l2_normalize(target_visual(x_b)).cpu())
         labels.append(y_a.cpu())
@@ -932,12 +932,12 @@ class SteerRebase:
             verbose=verbose,
         )
 
-        f_a = train_data["features_A"].double()
-        delta_a = train_data["delta_A"].double()
-        f_b = train_data["features_B"].double()
+        f_a = train_data["features_A"].float()
+        delta_a = train_data["delta_A"].float()
+        f_b = train_data["features_B"].float()
         train_labels = train_data["y_A"].long()
-        delta_a_test = test_data["delta_A"].double()
-        f_b_test = test_data["features_B"].double()
+        delta_a_test = test_data["delta_A"].float()
+        f_b_test = test_data["features_B"].float()
         test_labels = test_data["y_A"].long()
 
         if few_shot is not None:
