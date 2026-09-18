@@ -454,8 +454,9 @@ class RebasedHFLM(HFLM):
         calib_split: str = "train",
         calib_fields: str = "text",
         calib_samples: int = 64,
-        # ponytail: steer_text's test diagnostics build [test tokens, vocab] float64
-        # logits, so this stays tiny; raise it only with RAM to spare.
+        # steer_text's test diagnostics score [test tokens, vocab] logits in row
+        # chunks (see _head_metrics), so this no longer has to stay tiny for RAM;
+        # it still costs a forward pass per source and target model.
         calib_test_samples: int = 4,
         calib_max_length: int = 256,
         calib_batch_size: int = 8,

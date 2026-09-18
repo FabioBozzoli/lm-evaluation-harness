@@ -294,7 +294,14 @@ def test_steer_text_on_lm_head_shifts_logits_and_restores(tmp_path, stage_2) -> 
     target = _tiny_lm(48, seed=2)
     prepared = _fit_steer(tmp_path, source_pre, source_ft, target, **stage_2)
     assert prepared["stage_2_strategy"] == stage_2["stage_2_strategy"]
-    assert set(prepared["diagnostics"]) == {"stage0_test_acc", "stage1_test_acc", "stage2_test_acc"}
+    assert set(prepared["diagnostics"]) == {
+        "stage0_test_acc",
+        "stage1_test_acc",
+        "stage2_test_acc",
+        "stage0_test_loss",
+        "stage1_test_loss",
+        "stage2_test_loss",
+    }
 
     x = torch.tensor(_rows(n=2, seed=5)[0]).unsqueeze(0)
     with torch.no_grad():

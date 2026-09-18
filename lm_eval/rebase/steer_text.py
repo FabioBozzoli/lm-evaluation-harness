@@ -45,6 +45,7 @@ Limits, enforced at runtime:
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
@@ -397,15 +398,16 @@ def _collect_linear_split(
     }
 
 
-def _accuracy(
+def _head_metrics(
     features: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     labels: torch.Tensor,
     *,
     mask_class: Sequence[int] | None = None,
-) -> float:
-    """Head accuracy on raw (un-normalized) pooled features.
+    chunk: int = 512,
+) -> tuple[float, float]:
+    """Top-1 accuracy *and* mean cross-entropy of raw (un-normalized) pooled features.
 
     ``steer._accuracy`` L2-normalizes first because CLIP zero-shot lives on the
     unit sphere; a classification head does not, so normalizing here would score
@@ -414,17 +416,36 @@ def _accuracy(
     ``mask_class`` restricts the argmax to the head columns this task actually
     uses, mirroring ``TextLM.sequence_classification_accuracy``. Without it a
     two-way task sharing a three-way head could "predict" the class it never has,
-    and the diagnostic would not line up with the target_zeroshot baseline.
+    and the diagnostic would not line up with the target_zeroshot baseline. It
+    deliberately does *not* restrict the cross-entropy, which stays the honest
+    log-loss over the whole head.
+
+    Accuracy alone is a poor read on a vocabulary-sized head: a correction that
+    moves probability mass toward the right token without winning the argmax does
+    not move it at all. The cross-entropy returned alongside is the same quantity
+    ``hf_rebased.steering_loss_report`` measures through the live forward pass, so
+    the two are directly comparable and a gap between them isolates a Stage 1/2
+    problem from a live-integration one.
+
+    Streamed in row chunks: the full ``[rows, classes]`` logit matrix is never
+    materialised, which on a 128k-token head is the difference between a few
+    hundred MB and hundreds of GB.
     """
-    logits = features @ weight.T
-    if bias is not None:
-        logits = logits + bias
-    if mask_class is not None:
-        index = torch.tensor([int(c) for c in mask_class], dtype=torch.long)
-        prediction = index[logits.index_select(dim=1, index=index).argmax(dim=1)]
-    else:
-        prediction = logits.argmax(dim=1)
-    return float(prediction.eq(labels).double().mean())
+    index = None if mask_class is None else torch.tensor([int(c) for c in mask_class], dtype=torch.long)
+    correct, loss_sum, rows = 0, 0.0, int(features.shape[0])
+    for start in range(0, rows, chunk):
+        block = features[start : start + chunk]
+        target = labels[start : start + chunk]
+        logits = block @ weight.T
+        if bias is not None:
+            logits = logits + bias
+        if index is not None:
+            prediction = index[logits.index_select(dim=1, index=index).argmax(dim=1)]
+        else:
+            prediction = logits.argmax(dim=1)
+        correct += int(prediction.eq(target).sum())
+        loss_sum += float(nn.functional.cross_entropy(logits.float(), target, reduction="sum"))
+    return correct / rows, loss_sum / rows
 
 
 def _head_tensors(model: nn.Module) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -590,10 +611,13 @@ class SteerTextRebase:
         p_b = torch.linalg.pinv(w_b)
         train_target = delta_a[selected] @ logit_map.T @ p_b.T
         test_target = delta_a_test @ logit_map.T @ p_b.T
-        stage1_test_acc = _accuracy(f_b_test + test_target, w_b, b_b, test_labels, mask_class=mask_class)
+        stage1_test_acc, stage1_test_loss = _head_metrics(
+            f_b_test + test_target, w_b, b_b, test_labels, mask_class=mask_class
+        )
         if verbose:
             print(
                 f"{log_prefix} prepare: stage1 oracle test acc = {stage1_test_acc:.4f} "
+                f"loss = {stage1_test_loss:.4f}  ppl = {math.exp(stage1_test_loss):.4f} "
                 "(uses A's delta at test time; diagnostic only)"
             )
 
@@ -699,17 +723,19 @@ class SteerTextRebase:
         cached_test_activations: dict[str, Any] = {"global": f_b_test}
         if need_blocks:
             cached_test_activations["blocks"] = {int(b): v.double() for b, v in test_data["features_B_blocks"].items()}
-        stage2_test_acc = _accuracy(
+        stage2_test_acc, stage2_test_loss = _head_metrics(
             f_b_test + correction_fn(cached_test_activations), w_b, b_b, test_labels, mask_class=mask_class
         )
-        stage0_test_acc = _accuracy(f_b_test, w_b, b_b, test_labels, mask_class=mask_class)
+        stage0_test_acc, stage0_test_loss = _head_metrics(f_b_test, w_b, b_b, test_labels, mask_class=mask_class)
         if verbose:
             print(
                 f"{log_prefix} prepare: cached-space B zero-shot test acc = {stage0_test_acc:.4f} "
+                f"loss = {stage0_test_loss:.4f}  ppl = {math.exp(stage0_test_loss):.4f} "
                 "(compare with the target_zeroshot baseline below -- they should match)"
             )
             print(
                 f"{log_prefix} prepare: stage2 ({stage_2_strategy}) cached test acc = {stage2_test_acc:.4f} "
+                f"loss = {stage2_test_loss:.4f}  ppl = {math.exp(stage2_test_loss):.4f} "
                 "(predicted from B's cached features, no alpha)"
             )
 
@@ -731,6 +757,9 @@ class SteerTextRebase:
                 "stage0_test_acc": stage0_test_acc,
                 "stage1_test_acc": stage1_test_acc,
                 "stage2_test_acc": stage2_test_acc,
+                "stage0_test_loss": stage0_test_loss,
+                "stage1_test_loss": stage1_test_loss,
+                "stage2_test_loss": stage2_test_loss,
             },
         }
 
