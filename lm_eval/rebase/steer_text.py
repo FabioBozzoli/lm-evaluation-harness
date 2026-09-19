@@ -518,11 +518,14 @@ class SteerTextRebase:
         source_pretrained_model = llm_source_pretrained.model
         target_model = llm_target.model
 
-        w_a, _ = _head_tensors(source_model)
+        w_a, b_a = _head_tensors(source_model)
         w_b, b_b = _head_tensors(target_model)
 
         print(f"w_a.shape = {w_a.shape}, w_b.shape = {w_b.shape}")
-        if w_a.shape[0] != w_b.shape[0]: w_a = w_a[:w_b.shape[0]]
+        if w_a.shape[0] != w_b.shape[0]:
+            w_a = w_a[: w_b.shape[0]]
+            if b_a is not None:
+                b_a = b_a[: w_b.shape[0]]
 
         n_source_params = sum(p.numel() for p in source_model.parameters())
         if feature_regime == "linear" and n_source_params > _LINEAR_REGIME_PARAM_WARN:
@@ -586,9 +589,25 @@ class SteerTextRebase:
         f_a = train_data["features_A"].double()
         delta_a = train_data["delta_A"].double()
         f_b = train_data["features_B"].double()
+        f_a_test = test_data["features_A"].double()
         delta_a_test = test_data["delta_A"].double()
         f_b_test = test_data["features_B"].double()
         test_labels = test_data["y_A"].long()
+
+        # features_A stores A's *pretrained* feature (see the module docstring), so
+        # A's own finetuned feature -- the ceiling for how much capability Stage 1's
+        # cross-family transport can possibly recover -- is features_A + delta_A,
+        # scored through A's own head, on A's own test rows (same tokenized batches,
+        # so test_labels line up unchanged).
+        source_ft_test_acc, source_ft_test_loss = _head_metrics(
+            f_a_test + delta_a_test, w_a, b_a, test_labels, mask_class=mask_class
+        )
+        if verbose:
+            print(
+                f"{log_prefix} prepare: source A finetuned own test acc = {source_ft_test_acc:.4f} "
+                f"loss = {source_ft_test_loss:.4f}  ppl = {math.exp(source_ft_test_loss):.4f} "
+                "(A's own head on A's own finetuned feature; ceiling for stage1's cross-family transport)"
+            )
 
         # Support-set selection runs on *local* 0..K-1 labels, not the head-space
         # ids stored in y_A: _few_shot walks range(labels.max() + 1) and would
@@ -807,6 +826,8 @@ class SteerTextRebase:
             "logit_map": logit_map,
             "p_b": p_b,
             "diagnostics": {
+                "source_ft_test_acc": source_ft_test_acc,
+                "source_ft_test_loss": source_ft_test_loss,
                 "stage0_test_acc": stage0_test_acc,
                 "stage1_test_acc": stage1_test_acc,
                 "stage2_test_acc": stage2_test_acc,

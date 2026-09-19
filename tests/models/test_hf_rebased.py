@@ -295,6 +295,8 @@ def test_steer_text_on_lm_head_shifts_logits_and_restores(tmp_path, stage_2) -> 
     prepared = _fit_steer(tmp_path, source_pre, source_ft, target, **stage_2)
     assert prepared["stage_2_strategy"] == stage_2["stage_2_strategy"]
     assert set(prepared["diagnostics"]) == {
+        "source_ft_test_acc",
+        "source_ft_test_loss",
         "stage0_test_acc",
         "stage1_test_acc",
         "stage2_test_acc",
