@@ -664,6 +664,11 @@ class SteerTextRebase:
                 return out.to(dtype=global_act.dtype, device=global_act.device)
 
         elif stage_2_strategy == "global_mlp":
+
+            def _mlp_eval_fn(candidate: nn.Module) -> tuple[float, float]:
+                predicted = candidate(f_b_test.to(next(candidate.parameters()).device)).cpu()
+                return _head_metrics(f_b_test + predicted, w_b, b_b, test_labels, mask_class=mask_class)
+
             model = _fit_global_mlp(
                 f_b[selected],
                 train_target,
@@ -672,6 +677,7 @@ class SteerTextRebase:
                 hidden_dim=int(mlp_hidden_dim),
                 verbose=verbose,
                 log_prefix=log_prefix,
+                eval_fn=_mlp_eval_fn,
             ).to(dev)
 
             def correction_fn(activations: Mapping[str, Any], *, _model=model) -> torch.Tensor:

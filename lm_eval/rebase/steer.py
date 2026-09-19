@@ -199,7 +199,14 @@ def _fit_global_mlp(
     hidden_dim: int = 1024,
     verbose: bool = False,
     log_prefix: str = "",
+    eval_fn: Callable[[nn.Module], tuple[float, float]] | None = None,
+    eval_every: int = 1,
 ) -> _ResidualMLP:
+    """``eval_fn(model) -> (val_acc, val_loss)`` is called every ``eval_every`` steps and
+    printed alongside the train MSE, model set to eval() for the call. Left to the caller
+    (steer_text's ``_head_metrics`` closes over the real head + test set) so this module
+    does not need to know what "accuracy" means for the caller's task.
+    """
     torch.manual_seed(seed)
     model = _ResidualMLP(train_features.shape[1], hidden_dim, train_target.shape[1]).double().to(train_features.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
@@ -209,7 +216,14 @@ def _fit_global_mlp(
         loss.backward()
         optimizer.step()
         if verbose:
-            print(f"{log_prefix} global_mlp step {step + 1}/{epochs}: train mse = {loss.item():.6f}")
+            msg = f"{log_prefix} global_mlp step {step + 1}/{epochs}: train mse = {loss.item():.6f}"
+            if eval_fn is not None and (step + 1) % eval_every == 0:
+                model.eval()
+                with torch.no_grad():
+                    val_acc, val_loss = eval_fn(model)
+                model.train()
+                msg += f"  val acc = {val_acc:.4f}  val loss = {val_loss:.4f}"
+            print(msg)
     model.eval()
     return model
 
