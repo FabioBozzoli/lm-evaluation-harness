@@ -639,6 +639,8 @@ class SteerTextRebase:
                 seed=10_000 + int(seed) * 100 + int(selected.numel()),
                 epochs=int(mlp_epochs),
                 hidden_dim=int(mlp_hidden_dim),
+                verbose=verbose,
+                log_prefix=log_prefix,
             ).to(dev)
 
             def correction_fn(activations: Mapping[str, Any], *, _model=model) -> torch.Tensor:
@@ -726,6 +728,15 @@ class SteerTextRebase:
         stage2_test_acc, stage2_test_loss = _head_metrics(
             f_b_test + correction_fn(cached_test_activations), w_b, b_b, test_labels, mask_class=mask_class
         )
+        train_labels = train_data["y_A"].long()[selected]
+        cached_train_activations: dict[str, Any] = {"global": f_b[selected]}
+        if need_blocks:
+            cached_train_activations["blocks"] = {
+                int(b): v[selected].double() for b, v in train_data["features_B_blocks"].items()
+            }
+        stage2_train_acc, stage2_train_loss = _head_metrics(
+            f_b[selected] + correction_fn(cached_train_activations), w_b, b_b, train_labels, mask_class=mask_class
+        )
         stage0_test_acc, stage0_test_loss = _head_metrics(f_b_test, w_b, b_b, test_labels, mask_class=mask_class)
         if verbose:
             print(
@@ -734,7 +745,12 @@ class SteerTextRebase:
                 "(compare with the target_zeroshot baseline below -- they should match)"
             )
             print(
-                f"{log_prefix} prepare: stage2 ({stage_2_strategy}) cached test acc = {stage2_test_acc:.4f} "
+                f"{log_prefix} prepare: stage2 ({stage_2_strategy}) train acc = {stage2_train_acc:.4f} "
+                f"loss = {stage2_train_loss:.4f}  ppl = {math.exp(stage2_train_loss):.4f} "
+                "(predicted from B's cached support-set features, no alpha)"
+            )
+            print(
+                f"{log_prefix} prepare: stage2 ({stage_2_strategy}) validation (test) acc = {stage2_test_acc:.4f} "
                 f"loss = {stage2_test_loss:.4f}  ppl = {math.exp(stage2_test_loss):.4f} "
                 "(predicted from B's cached features, no alpha)"
             )
@@ -757,9 +773,11 @@ class SteerTextRebase:
                 "stage0_test_acc": stage0_test_acc,
                 "stage1_test_acc": stage1_test_acc,
                 "stage2_test_acc": stage2_test_acc,
+                "stage2_train_acc": stage2_train_acc,
                 "stage0_test_loss": stage0_test_loss,
                 "stage1_test_loss": stage1_test_loss,
                 "stage2_test_loss": stage2_test_loss,
+                "stage2_train_loss": stage2_train_loss,
             },
         }
 

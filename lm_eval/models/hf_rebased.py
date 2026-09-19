@@ -362,7 +362,10 @@ def steering_loss_report(
     loss, which is closer to what a downstream generation metric (pass@1, exact-match)
     rewards than an exact top-1 match ever is.
 
-    Three numbers, all lower-is-better:
+    Four numbers, all lower-is-better:
+    - ``source_ft``: A finetuned, evaluated on its own next-token prediction (its own
+      vocabulary/tokenizer, own test split) -- a reference ceiling for how good the
+      capability being transported actually is at the source.
     - ``stage0``: B, uncorrected.
     - ``stage1_oracle``: B + A's *real* delta on this exact batch, projected through Stage
       1's fitted ``logit_map``/``p_b`` -- a ceiling never available at real eval time
@@ -380,6 +383,7 @@ def steering_loss_report(
     device = next(target.parameters()).device
 
     stage0_loss = next_token_loss(target, target_loader, device)
+    source_ft_loss = next_token_loss(source_finetuned, source_loader, device)
     totals = {"stage1_oracle": 0.0, "stage2": 0.0}
     n_tokens = 0
 
@@ -410,7 +414,7 @@ def steering_loss_report(
         logits1 = lm_head(corrected)
         totals["stage1_oracle"] += F.cross_entropy(logits1.float(), labels, reduction="sum").item()
 
-    report = {"stage0_loss": stage0_loss}
+    report = {"stage0_loss": stage0_loss, "source_ft_loss": source_ft_loss}
     report.update({f"{name}_loss": total / n_tokens for name, total in totals.items()})
     report.update({key.replace("_loss", "_ppl"): math.exp(value) for key, value in report.items()})
     return report
@@ -589,6 +593,7 @@ class RebasedHFLM(HFLM):
                 report = steering_loss_report(
                     self.model, prepared, *sources, test_loaders, alpha=float(alpha)
                 )
+                _report_loss("source A finetuned (own next-token ppl)", report["source_ft_loss"])
                 _report_loss("stage0 (B uncorrected)", report["stage0_loss"])
                 _report_loss("stage1 (oracle, A's real delta)", report["stage1_oracle_loss"])
                 _report_loss(f"stage2 (live correction, alpha={alpha})", report["stage2_loss"])

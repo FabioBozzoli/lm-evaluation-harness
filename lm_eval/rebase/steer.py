@@ -197,15 +197,19 @@ def _fit_global_mlp(
     seed: int,
     epochs: int = 100,
     hidden_dim: int = 1024,
+    verbose: bool = False,
+    log_prefix: str = "",
 ) -> _ResidualMLP:
     torch.manual_seed(seed)
     model = _ResidualMLP(train_features.shape[1], hidden_dim, train_target.shape[1]).double()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
-    for _ in range(epochs):
+    for step in range(epochs):
         optimizer.zero_grad(set_to_none=True)
         loss = (model(train_features) - train_target).square().mean()
         loss.backward()
         optimizer.step()
+        if verbose:
+            print(f"{log_prefix} global_mlp step {step + 1}/{epochs}: train mse = {loss.item():.6f}")
     model.eval()
     return model
 

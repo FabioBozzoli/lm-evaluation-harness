@@ -298,9 +298,11 @@ def test_steer_text_on_lm_head_shifts_logits_and_restores(tmp_path, stage_2) -> 
         "stage0_test_acc",
         "stage1_test_acc",
         "stage2_test_acc",
+        "stage2_train_acc",
         "stage0_test_loss",
         "stage1_test_loss",
         "stage2_test_loss",
+        "stage2_train_loss",
     }
 
     x = torch.tensor(_rows(n=2, seed=5)[0]).unsqueeze(0)
