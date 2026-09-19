@@ -50,6 +50,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -619,6 +620,36 @@ class SteerTextRebase:
                 f"{log_prefix} prepare: stage1 oracle test acc = {stage1_test_acc:.4f} "
                 f"loss = {stage1_test_loss:.4f}  ppl = {math.exp(stage1_test_loss):.4f} "
                 "(uses A's delta at test time; diagnostic only)"
+            )
+
+        # The only things a Stage 2 hyperparameter sweep needs beyond the feature
+        # cache above (features_A/delta_A/features_B/y_A, already on disk via
+        # _load_or_compute_split): Stage 1's output and the real head. Small
+        # tensors, saved once so a sweep never has to reload any HF model.
+        stage1_path = (
+            Path(feature_cache_dir)
+            / f"{source_tag}_to_{target_tag}"
+            / task
+            / feature_regime
+            / f"stage1_artifacts_n{total_support_examples}_fewshot{few_shot}_seed{seed}_lam{stage1_lambda}.pt"
+        )
+        stage1_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "selected": selected.cpu(),
+                "logit_map": logit_map.cpu(),
+                "p_b": p_b.cpu(),
+                "w_b": w_b.cpu(),
+                "b_b": None if b_b is None else b_b.cpu(),
+                "mask_class": None if mask_class is None else list(mask_class),
+            },
+            stage1_path,
+        )
+        if verbose:
+            print(
+                f"{log_prefix} prepare: saved stage1 artifacts to {stage1_path} -- "
+                "use scripts/rebase/sweep_stage2_mlp.py to try Stage 2 configs offline, "
+                "reusing the feature cache above and this file"
             )
 
         num_source_blocks: int | None = None

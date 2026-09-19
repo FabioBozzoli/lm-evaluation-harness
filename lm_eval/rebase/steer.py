@@ -201,7 +201,7 @@ def _fit_global_mlp(
     log_prefix: str = "",
 ) -> _ResidualMLP:
     torch.manual_seed(seed)
-    model = _ResidualMLP(train_features.shape[1], hidden_dim, train_target.shape[1]).double()
+    model = _ResidualMLP(train_features.shape[1], hidden_dim, train_target.shape[1]).double().to(train_features.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
     for step in range(epochs):
         optimizer.zero_grad(set_to_none=True)
